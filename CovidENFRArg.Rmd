@@ -1,0 +1,186 @@
+---
+title: "Factores de riesgo y tasa de letalidad por COVID-19 en aglomerados urbanos con 1 millón a 2 millones de habitantes"
+subtitle: "Agustín Nava - 2020"
+output: 
+  html_document: 
+    df_print: paged
+    fig_height: 8
+    fig_width: 12
+    number_sections: yes
+    theme: paper
+    toc: yes
+    toc_float:
+      toc_collapsed: yes
+editor_options: 
+  chunk_output_type: console
+---
+```{r options, echo = FALSE}
+
+knitr::opts_chunk$set(warning = FALSE,
+                      error = FALSE,
+                      message = FALSE)
+
+``` 
+ 
+# Introducción
+
+En este trabajo me propongo a buscar si las variaciones en las medias de ciertos parametros de riesgo medidos en la Encuesta Nacional de Factores de Riesgo (2018) están relacionadas con los cambios en el indice de letalidad por COVID-19.
+
+Para lograr cierta homogeneidad, me focalicé en los aglomerados urbanos cuya población superara el millón de habitantes pero que sea inferior a dos millones según el censo nacional del 2010. 
+Esta selección no será dificil en caso de los datos presentados en la ENFR, no así con la base de datos COVID, ya que hay muchos registros que dejan el partido de origen sin especificar. 
+
+# Exploración y transformación de bases
+
+## Cargo librerías y bases
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(dplyr)
+library(readxl)
+library(readr)
+library(tidyverse)
+library(survey)
+```
+```{r}
+Covid19Casos<- read_csv("Covid19Casos.csv")
+enfr2018 <- readRDS("enfr2018rep.rds")
+```
+
+## Base COVID
+
+Luego de cargar los dataframes, me concentro en cada uno de ellos. Primero me quedo con los casos que correspondan a los aglomerados mencionados. Posteriormente, cuento la cantidad de _infectados y fallecidos_.
+
+```{r}
+gr <- c("Rosario", "San Lorenzo")
+gm <- c("Las Heras", "Capital", "Guaymallén", "Godoy Cruz", "Luján de Cuyo", "Maipú")
+gc <- c("Capital", "Colón", "Punilla", "Santa María", "Río Primero", "Río Segundo")
+pv <- c("Córdoba", "Santa Fe", "Mendoza")
+
+COVIDCASOS_AGLOM <- Covid19Casos %>% 
+  mutate(aglomerado = case_when(residencia_departamento_nombre %in% gr ~ "GRAN_ROSARIO",
+                                  residencia_departamento_nombre %in% gm ~ "GRAN_MENDOZA",
+                                  residencia_departamento_nombre %in% gc ~ "GRAN_CORDOBA")) %>%
+  filter(!is.na(aglomerado)) %>%
+  filter(residencia_provincia_nombre == pv) %>%
+  group_by(aglomerado) %>% 
+  summarise(total_casos = sum(clasificacion_resumen == "Confirmado"))
+
+COVIDTERAPIA_AGLOM <- Covid19Casos %>% 
+  mutate(aglomerado = case_when(residencia_departamento_nombre %in% gr ~ "GRAN_ROSARIO",
+                                  residencia_departamento_nombre %in% gm ~ "GRAN_MENDOZA",
+                                  residencia_departamento_nombre %in% gc ~ "GRAN_CORDOBA")) %>%
+  filter(!is.na(aglomerado)) %>%
+  filter(residencia_provincia_nombre == pv) %>%
+  group_by(aglomerado) %>% 
+  summarise(total_fall = sum(fallecido == "SI"))
+
+COVIDAGLOM <- left_join(COVIDCASOS_AGLOM,
+                        COVIDTERAPIA_AGLOM,
+                        by = "aglomerado")
+
+```
+
+Para finalizar, calculo la _tasa de letalidad según aglomerado_.
+
+```{r}
+COVIDAGLOM <- COVIDAGLOM %>%
+  mutate(tasa = (total_fall/total_casos)*100)
+```
+
+```{r}
+COVIDAGLOM
+```
+
+
+## Base ENFR 2018
+
+En esta parte seleccioné los datos que correspondían a los aglomerados de interes y luego indiqué el diseño de muestreo para utilizar la librería __survey__. 
+
+```{r}
+
+  enfr_aglom <- enfr2018 %>% 
+    filter(aglomerado == '2' | aglomerado == '3' | aglomerado == '4') %>%
+      mutate(aglomerado = case_when(aglomerado == 2 ~ "GRAN_CORDOBA",
+                             aglomerado == 3 ~ "GRAN_ROSARIO",
+                             aglomerado == 4 ~ "GRAN_MENDOZA",)) 
+
+disenoaglom <- svrepdesign(data = enfr_aglom, 
+                       weights = ~wf2p,
+                       repweights = "wf1p_rep[1-9]+",
+                       type = "bootstrap",
+                       mse = T)
+
+```
+
+Ya apartados los aglomerados de interés, comienzo a calcular las medias que presentan los datos que voy a utilizar. En este caso busqué tres valores que reflejaran la prevalencia de obesidad, diabetes e hipertensión. Los seleccionados fueron: 
+
+1) __Indice de masa corporal__ agrupado según mediciones antropométricas ≥ 30.
+2) __Glucemia__ por autorreporte o medición bioquímica elevada.
+3) __Presión alta__ registrada por profesional de salud en más de una ocasión.
+
+```{r}
+IMCALTO_AGLOM <- svyby(~as.factor(imc_categorias_bima == 3), ~as.factor(aglomerado), disenoaglom, na = TRUE, svymean)
+
+GLUCELEVAUTOREP_AGLOM <- svyby(~as.factor(prevalencia_glucemia_elevada_combinada == 1), ~as.factor(aglomerado), disenoaglom, na = TRUE, svymean)
+
+DXHTA_AGLOM <- svyby(~as.factor(biha03 == 2), ~as.factor(aglomerado), disenoaglom, na = TRUE, svymean)
+
+FR_AGLOM <- left_join(IMCALTO_AGLOM,
+                      GLUCELEVAUTOREP_AGLOM,
+                      by = "as.factor(aglomerado)") %>%
+  left_join(DXHTA_AGLOM,
+            by = "as.factor(aglomerado)") %>%
+  rename("aglomerado" = "as.factor(aglomerado)",  "imcelev" = "as.factor(imc_categorias_bima == 3)TRUE", "glucelevautorep" = "as.factor(prevalencia_glucemia_elevada_combinada == 1)TRUE", "dxhta" = "as.factor(biha03 == 2)TRUE") %>%
+  select(aglomerado, imcelev, glucelevautorep, dxhta)
+
+FR_AGLOM
+
+```
+
+Por ultimo, combino ambas bases.
+
+```{r}
+COVID_FR_AGLOM <- left_join(COVIDAGLOM,
+                      FR_AGLOM,
+                      by = "aglomerado")
+```
+
+# Regresiones
+
+```{r}
+
+rl_hta <-  lm(tasa ~ dxhta,
+               COVID_FR_AGLOM)
+summary(rl_hta)
+
+ggplot(COVID_FR_AGLOM, aes(x = tasa, y = dxhta)) + 
+  geom_point() +
+  stat_smooth(method = "lm", col = "red")
+
+```
+
+```{r}
+rl_imc <-  lm(tasa ~ imcelev,
+               COVID_FR_AGLOM)
+summary(rl_imc)
+
+ggplot(COVID_FR_AGLOM, aes(x = tasa, y = imcelev)) + 
+  geom_point() +
+  stat_smooth(method = "lm", col = "red")
+```
+
+```{r}
+rl_gluc <-  lm(tasa ~ glucelevautorep,
+               COVID_FR_AGLOM)
+summary(rl_gluc)
+
+ggplot(COVID_FR_AGLOM, aes(x = tasa, y = glucelevautorep)) + 
+  geom_point() +
+  stat_smooth(method = "lm", col = "red")
+```
+
+# Conclusión
+
+La variación de la tasa de letalidad según aglomerado no estaría significativamente relacionada con la media regional de los valores de glucemia, ya que el valor de p no es lo suficientemente bajo como para rechazar la hipotesis nula en estos casos. Sin embargo, el valor de p relacionando esta tasa con la media de registros alterados de presión arterial e IMC aumentado es menor a 0.01, por lo que invitaría a realizar estudios posteriores sobre esta relación. 
